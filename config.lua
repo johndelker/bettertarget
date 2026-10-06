@@ -1,6 +1,6 @@
 local config = {}
 config.defaults = {
-    enableTargetCycling = true, skipSelf = false,
+    enableTargetCycling = true, prioritizeCombat = false, skipSelf = false,
     enableBumperCycling = true, bumperInputMode = 0, bumperLeftButton = 52, bumperRightButton = 53,
     cursorEnabled = true, cursorWidth = 24, cursorHeight = 16, cursorOffset = 4,
     markerRed = 1, markerGreen = 1, markerBlue = 1, markerAlpha = 1,

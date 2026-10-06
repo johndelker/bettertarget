@@ -57,6 +57,20 @@ local function candidate_actor(entity, index, expected_actor)
     if entity:GetActorPointer(index) ~= actor then return nil end
     return actor
 end
+-- Low words of the active party/alliance members' server ids (ClaimStatus keeps the claimer's in its low word).
+local function party_claim_ids()
+    local party, ids = AshitaCore:GetMemoryManager():GetParty(), {}
+    for slot = 0, 17 do
+        if party:GetMemberIsActive(slot) ~= 0 then ids[bit.band(party:GetMemberServerId(slot), 0xFFFF)] = true end
+    end
+    return ids
+end
+-- 0 for monsters claimed by you or your party/alliance when prioritising combat, otherwise 1.
+local function combat_tier(entity, index, claim_ids)
+    if claim_ids == nil or bit.band(entity:GetSpawnFlags(index), 0x10) == 0 then return 1 end
+    local claimer = bit.band(entity:GetClaimStatus(index), 0xFFFF)
+    return (claimer ~= 0 and claim_ids[claimer]) and 0 or 1
+end
 local function candidates(camera, player, switching, settings)
     local result = {}
     local entity = AshitaCore:GetMemoryManager():GetEntity()
@@ -66,6 +80,7 @@ local function candidates(camera, player, switching, settings)
     fx, fy, fz = fx / length, fy / length, fz / length
     local rx, ry = -fy, fx
     local exclude_player = switching or (settings ~= nil and settings.skipSelf)
+    local claim_ids = settings ~= nil and settings.prioritizeCombat and party_claim_ids() or nil
     for index = 1, entity:GetEntityMapSize() - 1 do
         local actor = candidate_actor(entity, index)
         if actor and (not exclude_player or index ~= player.TargetIndex) then
@@ -82,12 +97,17 @@ local function candidates(camera, player, switching, settings)
                     if index == player.TargetIndex then
                         target_priority = 1000000
                     end
-                    result[#result + 1] = {index = index, actor = actor, x = sx, y = sy, priority = target_priority}
+                    result[#result + 1] = {index = index, actor = actor, x = sx, y = sy, priority = target_priority,
+                        tier = combat_tier(entity, index, claim_ids)}
                 end
             end
         end
     end
-    table.sort(result, function(a, b) return a.priority < b.priority end)
+    -- In-combat enemies (tier 0) ahead of everything else, each tier in the original screen order.
+    table.sort(result, function(a, b)
+        if a.tier ~= b.tier then return a.tier < b.tier end
+        return a.priority < b.priority
+    end)
     return result
 end
 local function select_target(direction, camera, player, switching, settings)
@@ -96,13 +116,14 @@ local function select_target(direction, camera, player, switching, settings)
     -- With nothing selectable, fall back to the player unless switching or the player is skipped.
     local function fallback() if not switching and not settings.skipSelf then target:SetTarget(player.TargetIndex, true) end end
     if #list == 0 then fallback(); return end
-    local current, current_order, closest, closest_distance = target:GetTargetIndex(0), 0, 0, 0
+    local current, current_order, closest, closest_tier, closest_distance = target:GetTargetIndex(0), 0, 0, 0, 0
     for i, candidate in ipairs(list) do
         if candidate.index == current then current_order = i end
-        -- Keep the original center preference (screen center is y = -0.5).
+        -- Keep the original center preference (screen center is y = -0.5), within the best tier.
         local distance = math.sqrt((math.abs(candidate.x) + 1) ^ 2 + (math.abs(candidate.y + 0.5) + 1) ^ 3)
-        if candidate.index ~= player.TargetIndex and (closest == 0 or distance < closest_distance) then 
-            closest, closest_distance = i, distance 
+        if candidate.index ~= player.TargetIndex and (closest == 0 or candidate.tier < closest_tier
+            or (candidate.tier == closest_tier and distance < closest_distance)) then
+            closest, closest_tier, closest_distance = i, candidate.tier, distance
         end
     end
     local next_order = closest
