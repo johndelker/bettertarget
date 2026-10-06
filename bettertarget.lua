@@ -98,6 +98,7 @@ local function draw_menu()
                         slider('DirectInput Right Bumper', 'bumperRightButton')
                     end
                 end
+                checkbox('Skip Myself When Cycling', 'skipSelf')
                 if not native_available then imgui.TextDisabled('Native action hooks unavailable; bumper cycling can still work.') end
                 imgui.EndTabItem()
             end
@@ -120,7 +121,7 @@ local function draw_menu()
 end
 local function help()
     print('[bettertarget] /bettertarget: configuration window')
-    print('[bettertarget] /bettertarget cycling on|off; bumpers on|off; cursor on|off')
+    print('[bettertarget] /bettertarget cycling on|off; bumpers on|off; cursor on|off; skipself on|off')
     print('[bettertarget] /bettertarget cursor width|height|size <4-128>; cursor offset <0-10>; help')
 end
 ashita.events.register('load', 'bettertarget_load', function()
@@ -140,7 +141,8 @@ ashita.events.register('command', 'bettertarget_command', function(e)
     if #args == 2 and args[2] == 'help' then help(); return end
     if not loaded then return end
     if #args == 3 then
-        local key = ({cursor = 'cursorEnabled', cycling = 'enableTargetCycling', bumpers = 'enableBumperCycling'})[args[2]]
+        local key = ({cursor = 'cursorEnabled', cycling = 'enableTargetCycling', bumpers = 'enableBumperCycling',
+            skipself = 'skipSelf'})[args[2]]
         if key and (args[3] == 'on' or args[3] == 'off') then
             settings[key] = args[3] == 'on'; config.save(settings); sync_actions()
             if key=='enableBumperCycling' or key=='enableTargetCycling' then gamepad.clear_pending() end

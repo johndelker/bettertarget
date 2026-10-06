@@ -57,7 +57,7 @@ local function candidate_actor(entity, index, expected_actor)
     if entity:GetActorPointer(index) ~= actor then return nil end
     return actor
 end
-local function candidates(camera, player, switching)
+local function candidates(camera, player, switching, settings)
     local result = {}
     local entity = AshitaCore:GetMemoryManager():GetEntity()
     local fx, fy, fz = camera.FocalX - camera.X, camera.FocalY - camera.Y, camera.FocalZ - camera.Z
@@ -65,9 +65,10 @@ local function candidates(camera, player, switching)
     if length <= 0 or length ~= length then return result end
     fx, fy, fz = fx / length, fy / length, fz / length
     local rx, ry = -fy, fx
+    local exclude_player = switching or (settings ~= nil and settings.skipSelf)
     for index = 1, entity:GetEntityMapSize() - 1 do
         local actor = candidate_actor(entity, index)
-        if actor and (not switching or index ~= player.TargetIndex) then
+        if actor and (not exclude_player or index ~= player.TargetIndex) then
             local x, y, z = entity:GetLocalPositionX(index), entity:GetLocalPositionY(index), entity:GetLocalPositionZ(index)
             local dx, dy, dz = x - camera.X, y - camera.Y, z - camera.Z
             local depth = dx * fx + dy * fy + dz * fz
@@ -89,10 +90,11 @@ local function candidates(camera, player, switching)
     table.sort(result, function(a, b) return a.priority < b.priority end)
     return result
 end
-local function select_target(direction, camera, player, switching)
+local function select_target(direction, camera, player, switching, settings)
     local target = AshitaCore:GetMemoryManager():GetTarget()
-    local list = candidates(camera, player, switching)
-    local function fallback() if not switching then target:SetTarget(player.TargetIndex, true) end end
+    local list = candidates(camera, player, switching, settings)
+    -- With nothing selectable, fall back to the player unless switching or the player is skipped.
+    local function fallback() if not switching and not settings.skipSelf then target:SetTarget(player.TargetIndex, true) end end
     if #list == 0 then fallback(); return end
     local current, current_order, closest, closest_distance = target:GetTargetIndex(0), 0, 0, 0
     for i, candidate in ipairs(list) do
@@ -185,10 +187,12 @@ function targeting.cycle(settings, direction, source)
     end
     local callback = target:GetMyroomCallback()
     if callback ~= nil and callback ~= 0 and not targeting.is_switching() then
+        -- Native room cycling already omits the player.
+        if settings.skipSelf then room_state = nil; return room_cycle ~= nil and room_cycle(direction) == true end
         return cycle_room_with_player(target, player, direction, callback)
     end
     room_state = nil
-    select_target(direction, camera, player, targeting.is_switching())
+    select_target(direction, camera, player, targeting.is_switching(), settings)
     return true
 end
 function targeting.zone_in() ready = base_camera ~= nil; room_state = nil end
