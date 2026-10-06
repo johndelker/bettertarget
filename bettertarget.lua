@@ -1,6 +1,6 @@
 addon.name = 'bettertarget'
 addon.author = 'SlowCircuit, atom0s'
-addon.version = '1.6.10'
+addon.version = '1.6.11'
 addon.desc = 'Screen-based native target cycling and a configurable native-anchored target cursor.'
 
 require('common')
@@ -98,6 +98,9 @@ local function draw_menu()
                         slider('DirectInput Right Bumper', 'bumperRightButton')
                     end
                 end
+                checkbox('Prioritize Enemies In Combat', 'prioritizeCombat')
+                imgui.TextDisabled('Enemies claimed by you or your party/alliance come first.')
+                checkbox('Skip Myself When Cycling', 'skipSelf')
                 if not native_available then imgui.TextDisabled('Native action hooks unavailable; bumper cycling can still work.') end
                 imgui.EndTabItem()
             end
@@ -120,8 +123,9 @@ local function draw_menu()
 end
 local function help()
     print('[bettertarget] /bettertarget: configuration window')
-    print('[bettertarget] /bettertarget cycling on|off; bumpers on|off; cursor on|off')
+    print('[bettertarget] /bettertarget cycling on|off; bumpers on|off; cursor on|off; combat on|off; skipself on|off')
     print('[bettertarget] /bettertarget cursor width|height|size <4-128>; cursor offset <0-10>; help')
+    print('[bettertarget] /bettertarget screencheck: show how on-screen targets are detected')
 end
 ashita.events.register('load', 'bettertarget_load', function()
     settings = config.load()
@@ -139,8 +143,13 @@ ashita.events.register('command', 'bettertarget_command', function(e)
     for i = 2, #args do args[i] = args[i]:lower() end
     if #args == 2 and args[2] == 'help' then help(); return end
     if not loaded then return end
+    if #args == 2 and args[2] == 'screencheck' then
+        for _, line in ipairs(targeting.screen_report(settings)) do print('[bettertarget] ' .. line) end
+        return
+    end
     if #args == 3 then
-        local key = ({cursor = 'cursorEnabled', cycling = 'enableTargetCycling', bumpers = 'enableBumperCycling'})[args[2]]
+        local key = ({cursor = 'cursorEnabled', cycling = 'enableTargetCycling', bumpers = 'enableBumperCycling',
+            combat = 'prioritizeCombat', skipself = 'skipSelf'})[args[2]]
         if key and (args[3] == 'on' or args[3] == 'off') then
             settings[key] = args[3] == 'on'; config.save(settings); sync_actions()
             if key=='enableBumperCycling' or key=='enableTargetCycling' then gamepad.clear_pending() end
@@ -179,6 +188,7 @@ ashita.events.register('d3d_beginscene', 'bettertarget_native_actions', function
 end)
 ashita.events.register('d3d_present', 'bettertarget_present', function()
     if not loaded then return end
+    targeting.capture_view()
     if ready and GetPlayerEntity() ~= nil then
         local style = appearance('')
         style.enabled, style.lockedSameAsStandard = settings.cursorEnabled, settings.lockedSameAsStandard
