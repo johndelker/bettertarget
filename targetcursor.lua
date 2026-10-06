@@ -15,10 +15,22 @@ local function live_target(memory, target, slot)
     local actor = memory:GetEntity():GetActorPointer(index)
     return actor ~= nil and actor ~= 0
 end
+local menu_width, menu_height
+local function menu_size()
+    if menu_width == nil then
+        local manager = AshitaCore:GetConfigurationManager()
+        menu_width = tonumber(manager:GetFloat('boot', 'ffxi.registry', '0037', 0)) or 0
+        menu_height = tonumber(manager:GetFloat('boot', 'ffxi.registry', '0038', 0)) or 0
+    end
+    return menu_width, menu_height
+end
 local function draw_at(style, x, y)
     x, y = tonumber(x), tonumber(y)
     if not x or not y or x ~= x or y ~= y then return end
     local display = imgui.GetIO().DisplaySize
+    -- Native anchors are in menu (UI) resolution, which the game scales to the window.
+    local menu_w, menu_h = menu_size()
+    if menu_w > 0 and menu_h > 0 then x, y = x * display.x / menu_w, y * display.y / menu_h end
     if x < 0 or y < 0 or x >= display.x or y >= display.y then return end
     y = y - (style.offset or 0)
     local width, height = style.width or 18, style.height or 18
