@@ -1,6 +1,6 @@
 addon.name = 'bettertarget'
 addon.author = 'SlowCircuit, atom0s'
-addon.version = '1.6.10'
+addon.version = '1.6.11'
 addon.desc = 'Screen-based native target cycling and a configurable native-anchored target cursor.'
 
 require('common')
