@@ -11,16 +11,20 @@ if not pcall(ffi.typeof, 'struct bettertarget_camera_t') then
     ]]
 end
 local targeting = {}
-local base_camera, connected, follow, room_cycle, subtarget_cycle
+local base_camera, connected, follow, room_cycle, subtarget_cycle, matches_modifier
 local ready = false
 local room_state
 -- Candidates must lie this far inside the screen edge (in normalised screen units).
 local SCREEN_EDGE = 0.975
+-- Nearby targets cycle in front/behind groups; each group runs left to right.
+local NEAR_DISTANCE = 10
+-- Approximate the body above an entity's feet; FFXI uses negative Z for up.
+local BODY_HEIGHT = 2
 -- Max yalms between the view matrix's eye and the camera object for the matrices to be trusted.
 local EYE_TOLERANCE = 2
 -- Last game camera matrices seen at present, as plain tables (cdata goes stale between frames).
 local view_matrix, projection_matrix
-function targeting.initialize(native_room_cycle, native_subtarget_cycle)
+function targeting.initialize(native_room_cycle, native_subtarget_cycle, modifier_matcher)
     local signature = ashita.memory.find('FFXiMain.dll', 0, '83C40485C974118B116A01FF5218C705', 0, 0)
     if not signature or signature == 0 then error('[bettertarget] Missing camera signature.') end
     local slot = ashita.memory.read_uint32(signature + 0x10)
@@ -33,6 +37,7 @@ function targeting.initialize(native_room_cycle, native_subtarget_cycle)
     follow = AshitaCore:GetMemoryManager():GetAutoFollow()
     room_cycle = native_room_cycle
     subtarget_cycle = native_subtarget_cycle
+    matches_modifier = modifier_matcher
     room_state = nil
     ready = true
 end
@@ -100,12 +105,31 @@ local function project(view, projection, x, y, z)
 end
 -- With the game's matrices the edges follow the real field of view and aspect ratio (widescreen,
 -- the aspect addon, camera pitch); sx/sy are the original angular offsets used as the fallback.
-local function on_screen(view, projection, x, y, z, sx, sy)
+local function screen_segment(x, y, tx, ty)
+    if x == nil then return false end
+    if math.abs(x) <= SCREEN_EDGE and math.abs(y) <= SCREEN_EDGE then return true end
+    if tx == nil then return false end
+    -- Clip the projected body segment against the screen, including the case
+    -- where both ends are outside but the body crosses the visible area.
+    local first, last = 0, 1
+    for _,axis in ipairs({{x,tx},{y,ty}}) do
+        local start, delta = axis[1], axis[2]-axis[1]
+        if math.abs(delta) < 1e-9 then
+            if math.abs(start) > SCREEN_EDGE then return false end
+        else
+            local a,b=(-SCREEN_EDGE-start)/delta,(SCREEN_EDGE-start)/delta
+            first,last=math.max(first,math.min(a,b)),math.min(last,math.max(a,b))
+        end
+    end
+    return first <= last
+end
+local function on_screen(view, projection, x, y, z, sx, sy, top_sx, top_sy)
     if view ~= nil then
         local nx, ny = project(view, projection, x, y, z)
-        return nx ~= nil and math.abs(nx) <= SCREEN_EDGE and math.abs(ny) <= SCREEN_EDGE
+        local tx, ty = project(view, projection, x, y, z-BODY_HEIGHT)
+        return screen_segment(nx,ny,tx,ty)
     end
-    return sx >= -SCREEN_EDGE and sx <= SCREEN_EDGE and sy >= -SCREEN_EDGE and sy <= SCREEN_EDGE
+    return screen_segment(sx,sy,top_sx,top_sy)
 end
 local function candidate_actor(entity, index, expected_actor)
     if index <= 0 or index >= entity:GetEntityMapSize() then return nil end
@@ -142,29 +166,41 @@ local function combat_tier(entity, index, claim_ids)
     local claimer = bit.band(entity:GetClaimStatus(index), 0xFFFF)
     return (claimer ~= 0 and claim_ids[claimer]) and 0 or 1
 end
-local function candidates(camera, player, switching, settings, angular_only)
+local function candidates(camera, player, switching, settings, angular_only, modifier)
     local result = {}
     local entity = AshitaCore:GetMemoryManager():GetEntity()
     local fx, fy, fz = camera.FocalX - camera.X, camera.FocalY - camera.Y, camera.FocalZ - camera.Z
     local length = math.sqrt(fx * fx + fy * fy + fz * fz)
     if length <= 0 or length ~= length then return result end
     fx, fy, fz = fx / length, fy / length, fz / length
-    local rx, ry = -fy, fx
+    local horizontal = math.sqrt(fx*fx+fy*fy)
+    local divisor = horizontal > 0 and horizontal or 1
+    local rx, ry = -fy/divisor, fx/divisor
     local view, projection
     if not angular_only then view, projection = camera_matrices(camera) end
-    local exclude_player = switching or (settings ~= nil and settings.skipSelf)
+    local exclude_player = switching or (settings ~= nil and settings.skipSelf and modifier ~= 'self')
     local claim_ids = settings ~= nil and settings.prioritizeCombat and party_claim_ids() or nil
+    local px, py, pz = entity:GetLocalPositionX(player.TargetIndex), entity:GetLocalPositionY(player.TargetIndex), entity:GetLocalPositionZ(player.TargetIndex)
+    local player_depth = (px-camera.X)*fx + (py-camera.Y)*fy + (pz-camera.Z)*fz
     for index = 1, entity:GetEntityMapSize() - 1 do
         local actor = candidate_actor(entity, index)
-        if actor and (not exclude_player or index ~= player.TargetIndex) then
+        if actor and (not exclude_player or index ~= player.TargetIndex)
+            and (modifier == nil or (matches_modifier and matches_modifier(entity, index, player.TargetIndex, modifier))) then
             local x, y, z = entity:GetLocalPositionX(index), entity:GetLocalPositionY(index), entity:GetLocalPositionZ(index)
             local dx, dy, dz = x - camera.X, y - camera.Y, z - camera.Z
             local depth = dx * fx + dy * fy + dz * fz
             -- Reject behind-camera points before division (including zero depth).
             if depth > 0 then
-                local sx, sy = -(dx * rx + dy * ry) / depth, -dz / depth
-                if on_screen(view, projection, x, y, z, sx, sy) then
-                    local target_priority = (depth / 100) + sx + sy + 2
+                local vertical = horizontal > 0 and (fz*(dx*fx+dy*fy)/horizontal-dz*horizontal) or -dz
+                local sx, sy = -(dx * rx + dy * ry) / depth, vertical/depth
+                local top_depth = depth-BODY_HEIGHT*fz
+                local top_sx = top_depth > 0 and sx*depth/top_depth or nil
+                local top_sy = top_depth > 0 and (vertical+BODY_HEIGHT*divisor)/top_depth or nil
+                if on_screen(view, projection, x, y, z, sx, sy, top_sx, top_sy) then
+                    local distance2 = (x-px)^2 + (y-py)^2 + (z-pz)^2
+                    local far = math.min(1, math.floor(distance2 / NEAR_DISTANCE^2))
+                    local behind = depth < player_depth and 1 or 0
+                    local target_priority = 2*far + (1-far)*behind + 0.5 + math.atan(sx)/math.pi
                     local name = entity:GetName(index) or 'Unknown'
                     --print(name .. ", depth=" .. depth .. ", sx=" .. sx .. ", sy=" .. sy .. ", priority=" .. target_priority)
                     if index == player.TargetIndex then
@@ -176,25 +212,27 @@ local function candidates(camera, player, switching, settings, angular_only)
             end
         end
     end
-    -- In-combat enemies (tier 0) ahead of everything else, each tier in the original screen order.
+    -- In-combat enemies (tier 0) ahead of everything else, each tier in spatial priority order.
     table.sort(result, function(a, b)
         if a.tier ~= b.tier then return a.tier < b.tier end
         return a.priority < b.priority
     end)
     return result
 end
-local function select_target(direction, camera, player, switching, settings)
+local function select_target(direction, camera, player, switching, settings, modifier)
     local target = AshitaCore:GetMemoryManager():GetTarget()
-    local list = candidates(camera, player, switching, settings)
+    local list = candidates(camera, player, switching, settings, false, modifier)
     -- With nothing selectable, fall back to the player unless switching or the player is skipped.
-    local function fallback() if not switching and not settings.skipSelf then target:SetTarget(player.TargetIndex, true) end end
+    local function fallback()
+        if modifier == nil and not switching and not settings.skipSelf then target:SetTarget(player.TargetIndex, true) end
+    end
     if #list == 0 then fallback(); return end
     local current, current_order, closest, closest_tier, closest_distance = target:GetTargetIndex(0), 0, 0, 0, 0
     for i, candidate in ipairs(list) do
         if candidate.index == current then current_order = i end
         -- Keep the original center preference (screen center is y = -0.5), within the best tier.
         local distance = math.sqrt((math.abs(candidate.x) + 1) ^ 2 + (math.abs(candidate.y + 0.5) + 1) ^ 3)
-        if candidate.index ~= player.TargetIndex and (closest == 0 or candidate.tier < closest_tier
+        if (candidate.index ~= player.TargetIndex or modifier == 'self') and (closest == 0 or candidate.tier < closest_tier
             or (candidate.tier == closest_tier and distance < closest_distance)) then
             closest, closest_tier, closest_distance = i, candidate.tier, distance
         end
@@ -224,7 +262,7 @@ function targeting.is_switching()
         and target:GetIsMenuOpen() ~= 0 and target:GetActionType() == 0
         and bit.band(target:GetSubTargetFlags(), 0x10) ~= 0
 end
-function targeting.can_cycle(settings, source)
+function targeting.can_cycle(settings, source, modifier)
     local player = GetPlayerEntity()
     local target = AshitaCore:GetMemoryManager():GetTarget()
     -- Preserve native lock-on: ordinary cycling must not select a new target.
@@ -234,7 +272,7 @@ function targeting.can_cycle(settings, source)
         or (source~='bumper' and settings.enableTargetCycling)
     return enabled and player ~= nil and player.StatusServer ~= 4 and get_camera() ~= nil
         and (target:GetIsSubTargetActive() == 0 or targeting.is_switching()
-            or (source == 'bumper' and subtarget_cycle ~= nil))
+            or ((source == 'bumper' or modifier ~= nil) and subtarget_cycle ~= nil))
 end
 local function room_target_key(target, entity)
     local index = target:GetTargetIndex(0)
@@ -267,9 +305,44 @@ local function cycle_room_with_player(target, player, direction, callback)
     end
     return true
 end
-function targeting.cycle(settings, direction, source)
+local function room_target_matches(target, entity, player, modifier)
+    local index = target:GetTargetIndex(0)
+    if index == 0 then return modifier == 'npcs' and room_target_key(target, entity) ~= nil end
+    return matches_modifier and matches_modifier(entity, index, player.TargetIndex, modifier) or false
+end
+local function cycle_filtered_room(target, player, direction, modifier)
+    if modifier == 'self' then
+        local entity = AshitaCore:GetMemoryManager():GetEntity()
+        if candidate_actor(entity, player.TargetIndex) then target:SetTarget(player.TargetIndex, true) end
+        room_state = nil
+        return true
+    end
+    local entity = AshitaCore:GetMemoryManager():GetEntity()
+    local start = room_target_key(target, entity)
+    for _ = 1, entity:GetEntityMapSize() + 1 do
+        if not room_cycle or room_cycle(direction) ~= true then room_state = nil; return false end
+        local key = room_target_key(target, entity)
+        if key == nil or key == start then room_state = nil; return true end
+        if room_target_matches(target, entity, player, modifier) then room_state = nil; return true end
+    end
+    room_state = nil
+    return true
+end
+local function cycle_filtered_subtarget(target, player, direction, modifier)
+    if subtarget_cycle == nil then return false end
+    local entity = AshitaCore:GetMemoryManager():GetEntity()
+    local start = target:GetTargetIndex(1)
+    for _ = 1, entity:GetEntityMapSize() + 1 do
+        if subtarget_cycle(direction) ~= true then return false end
+        local index = target:GetTargetIndex(1)
+        if index == start then return true end
+        if index ~= nil and matches_modifier and matches_modifier(entity, index, player.TargetIndex, modifier) then return true end
+    end
+    return true
+end
+function targeting.cycle(settings, direction, source, modifier)
     if direction ~= -1 and direction ~= 1 then return false end
-    if not targeting.can_cycle(settings, source) then return false end
+    if not targeting.can_cycle(settings, source, modifier) then return false end
     local player, camera = GetPlayerEntity(), get_camera()
     if player == nil or player.StatusServer == 4 or camera == nil then return false end
     -- Room doors are model targets, not entity indices accepted by SetTarget.
@@ -277,16 +350,18 @@ function targeting.cycle(settings, direction, source)
     local target = AshitaCore:GetMemoryManager():GetTarget()
     if target:GetIsSubTargetActive() ~= 0 and not targeting.is_switching() then
         -- The client applies each spell/ability's valid-target rules.
+        if modifier ~= nil then return cycle_filtered_subtarget(target, player, direction, modifier) end
         return source == 'bumper' and subtarget_cycle ~= nil and subtarget_cycle(direction) == true
     end
     local callback = target:GetMyroomCallback()
     if callback ~= nil and callback ~= 0 and not targeting.is_switching() then
         -- Native room cycling already omits the player.
+        if modifier ~= nil then return cycle_filtered_room(target, player, direction, modifier) end
         if settings.skipSelf then room_state = nil; return room_cycle ~= nil and room_cycle(direction) == true end
         return cycle_room_with_player(target, player, direction, callback)
     end
     room_state = nil
-    select_target(direction, camera, player, targeting.is_switching(), settings)
+    select_target(direction, camera, player, targeting.is_switching(), settings, modifier)
     return true
 end
 -- Lines for /bettertarget screencheck: which on-screen test is active and what it changes.

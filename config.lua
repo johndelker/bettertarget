@@ -12,6 +12,12 @@ config.ranges.borderThickness = {0, 12}
 config.ranges.bumperInputMode = {0, 2}
 config.ranges.bumperLeftButton = {48, 175}
 config.ranges.bumperRightButton = {48, 175}
+for _, category in ipairs({'Enemies', 'Players', 'Npcs', 'Self'}) do
+    config.defaults['modifier' .. category .. 'Source'] = 0
+    config.defaults['modifier' .. category .. 'Button'] = 0
+    config.ranges['modifier' .. category .. 'Source'] = {0, 2}
+    config.ranges['modifier' .. category .. 'Button'] = {0, 257}
+end
 for _, prefix in ipairs({'marker', 'border'}) do
     for _, channel in ipairs({'Red', 'Green', 'Blue', 'Alpha'}) do config.ranges[prefix .. channel] = {0, 1} end
 end
@@ -43,7 +49,7 @@ local function normalize(key, value)
     if type(value) ~= 'number' or value ~= value or value == math.huge or value == -math.huge then return default end
     local range = config.ranges[key]
     value=math.max(range[1], math.min(range[2], value))
-    if key:find('^bumper') then value=math.floor(value) end
+    if key:find('^bumper') or key:find('^modifier') then value=math.floor(value) end
     return value
 end
 function config.load()
